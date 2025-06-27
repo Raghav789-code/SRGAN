@@ -1,0 +1,98 @@
+# ✅ Install necessary libraries (if not already installed)
+!pip install opencv-python tqdm
+
+# ✅ Import Libraries
+import os
+import cv2
+import glob
+from tqdm import tqdm
+from PIL import Image
+import torchvision.transforms as transforms
+from torch.utils.data import Dataset, DataLoader
+import torch
+
+# ✅ Set Paths
+hr_dir = './DIV2K_train_HR/'
+lr_dir = './DIV2K_train_LR_bicubic/X4/'
+
+# ✅ Create LR Directory if not exists
+os.makedirs(lr_dir, exist_ok=True)
+
+# ✅ Generate LR images using bicubic downsampling
+scale = 4  # For 4x downsampling
+
+hr_images = glob.glob(os.path.join(hr_dir, '*.png'))
+
+print(f"Total HR images found: {len(hr_images)}")
+
+for img_path in tqdm(hr_images, desc="Generating LR images"):
+    img_name = os.path.basename(img_path)
+    hr_img = cv2.imread(img_path)
+
+    # Get height and width
+    h, w = hr_img.shape[:2]
+
+    # Downscale image
+    lr_img = cv2.resize(hr_img, (w // scale, h // scale), interpolation=cv2.INTER_CUBIC)
+
+    # Save LR image
+    cv2.imwrite(os.path.join(lr_dir, img_name.replace('.png', 'x4.png')), lr_img)
+
+print("✅ LR images generated successfully!")
+
+# ✅ Define PyTorch Dataset
+
+class DIV2KDataset(Dataset):
+    def __init__(self, hr_dir, lr_dir, transform_hr=None, transform_lr=None):
+        self.hr_images = sorted(glob.glob(os.path.join(hr_dir, '*.*')))
+        self.lr_images = sorted(glob.glob(os.path.join(lr_dir, '*.*')))
+        self.transform_hr = transform_hr
+        self.transform_lr = transform_lr
+
+    def __len__(self):
+        return len(self.hr_images)
+
+    def __getitem__(self, idx):
+        hr_image = Image.open(self.hr_images[idx]).convert('RGB')
+        lr_image = Image.open(self.lr_images[idx]).convert('RGB')
+
+        if self.transform_hr:
+            hr_image = self.transform_hr(hr_image)
+        if self.transform_lr:
+            lr_image = self.transform_lr(lr_image)
+
+        return {'lr': lr_image, 'hr': hr_image}
+
+# ✅ Define Transforms
+
+transform_hr = transforms.Compose([
+    transforms.ToTensor(),
+])
+
+transform_lr = transforms.Compose([
+    transforms.ToTensor(),
+])
+
+# ✅ Create Dataset Instance
+
+dataset = DIV2KDataset(
+    hr_dir='./DIV2K_train_HR/',
+    lr_dir='./DIV2K_train_LR_bicubic/X4/',
+    transform_hr=transform_hr,
+    transform_lr=transform_lr
+)
+
+# ✅ Create DataLoader
+
+dataloader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=2)
+
+# ✅ Test DataLoader
+
+for batch in dataloader:
+    lr = batch['lr']
+    hr = batch['hr']
+    print(f"LR batch shape: {lr.shape}")
+    print(f"HR batch shape: {hr.shape}")
+    break
+
+print("✅ DataLoader is working perfectly!")

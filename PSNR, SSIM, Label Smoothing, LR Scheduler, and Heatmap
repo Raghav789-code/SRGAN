@@ -1,0 +1,189 @@
+# ✅ Install required libraries
+!pip install piq opencv-python tqdm matplotlib
+
+# ✅ Import Libraries
+import os
+import cv2
+import glob
+from tqdm import tqdm
+from PIL import Image
+import numpy as np
+import torch
+import torchvision.transforms as transforms
+from torch.utils.data import Dataset, DataLoader
+import torch.nn as nn
+import torch.optim as optim
+import matplotlib.pyplot as plt
+import piq
+
+# ✅ Dataset Preparation
+class DIV2KDataset(Dataset):
+    def __init__(self, hr_dir, lr_dir, transform_hr=None, transform_lr=None):
+        self.hr_images = sorted(glob.glob(os.path.join(hr_dir, '*.*')))
+        self.lr_images = sorted(glob.glob(os.path.join(lr_dir, '*.*')))
+        self.transform_hr = transform_hr
+        self.transform_lr = transform_lr
+
+    def __len__(self):
+        return len(self.hr_images)
+
+    def __getitem__(self, idx):
+        hr_image = Image.open(self.hr_images[idx]).convert('RGB')
+        lr_image = Image.open(self.lr_images[idx]).convert('RGB')
+
+        if self.transform_hr:
+            hr_image = self.transform_hr(hr_image)
+        if self.transform_lr:
+            lr_image = self.transform_lr(lr_image)
+
+        return {'lr': lr_image, 'hr': hr_image}
+
+transform = transforms.Compose([
+    transforms.ToTensor(),
+])
+
+dataset = DIV2KDataset(
+    hr_dir='./DIV2K_train_HR/',
+    lr_dir='./DIV2K_train_LR_bicubic/X4/',
+    transform_hr=transform,
+    transform_lr=transform
+)
+
+dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+
+# ✅ Simple Generator Model
+class SimpleGenerator(nn.Module):
+    def __init__(self):
+        super(SimpleGenerator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(3, 64, 9, padding=4),
+            nn.PReLU(),
+            nn.Conv2d(64, 3 * 16, 3, padding=1),
+            nn.PixelShuffle(4),
+            nn.Conv2d(3, 3, 9, padding=4)
+        )
+
+    def forward(self, x):
+        return torch.tanh(self.model(x))
+
+# ✅ Simple Discriminator Model
+class SimpleDiscriminator(nn.Module):
+    def __init__(self):
+        super(SimpleDiscriminator, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(3, 64, 3, stride=2, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(64, 128, 3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2),
+            nn.Flatten(),
+            nn.Linear(128 * 16 * 16, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
+# ✅ Initialize models
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+generator = SimpleGenerator().to(device)
+discriminator = SimpleDiscriminator().to(device)
+
+# ✅ Optimizers
+g_optimizer = optim.Adam(generator.parameters(), lr=1e-4)
+d_optimizer = optim.Adam(discriminator.parameters(), lr=1e-4)
+
+# ✅ Learning Rate Scheduler
+g_scheduler = optim.lr_scheduler.StepLR(g_optimizer, step_size=20, gamma=0.5)
+d_scheduler = optim.lr_scheduler.StepLR(d_optimizer, step_size=20, gamma=0.5)
+
+# ✅ Loss Functions
+mse_loss = nn.MSELoss()
+bce_loss = nn.BCELoss()
+
+# ✅ Training Loop
+epochs = 5
+psnr_list = []
+ssim_list = []
+
+for epoch in range(epochs):
+    generator.train()
+    discriminator.train()
+
+    for batch in tqdm(dataloader, desc=f"Epoch {epoch+1}"):
+        lr = batch['lr'].to(device)
+        hr = batch['hr'].to(device)
+
+        # ---------------------
+        # Train Discriminator
+        # ---------------------
+        d_optimizer.zero_grad()
+
+        real_labels = torch.FloatTensor(hr.size(0), 1).uniform_(0.8, 1.0).to(device)  # Label Smoothing
+        fake_labels = torch.FloatTensor(hr.size(0), 1).uniform_(0.0, 0.2).to(device)
+
+        outputs_real = discriminator(hr)
+        d_loss_real = bce_loss(outputs_real, real_labels)
+
+        fake_imgs = generator(lr)
+        outputs_fake = discriminator(fake_imgs.detach())
+        d_loss_fake = bce_loss(outputs_fake, fake_labels)
+
+        d_loss = d_loss_real + d_loss_fake
+        d_loss.backward()
+        d_optimizer.step()
+
+        # ---------------------
+        # Train Generator
+        # ---------------------
+        g_optimizer.zero_grad()
+
+        fake_imgs = generator(lr)
+        outputs = discriminator(fake_imgs)
+        g_loss = mse_loss(fake_imgs, hr) + bce_loss(outputs, real_labels)
+
+        g_loss.backward()
+        g_optimizer.step()
+
+    # ✅ Scheduler Step
+    g_scheduler.step()
+    d_scheduler.step()
+
+    # ✅ Evaluation (PSNR and SSIM)
+    generator.eval()
+    with torch.no_grad():
+        batch = next(iter(dataloader))
+        lr = batch['lr'].to(device)
+        hr = batch['hr'].to(device)
+        sr = generator(lr)
+
+        psnr = piq.psnr(sr, hr, data_range=1.0).item()
+        ssim = piq.ssim(sr, hr, data_range=1.0).item()
+
+        psnr_list.append(psnr)
+        ssim_list.append(ssim)
+
+        print(f"Epoch {epoch+1}: PSNR = {psnr:.2f}, SSIM = {ssim:.4f}")
+
+print("✅ Training Complete!")
+
+# ✅ Heatmap Visualization for PSNR and SSIM Trends
+data = np.array([psnr_list, ssim_list])
+
+fig, ax = plt.subplots()
+im = ax.imshow(data, cmap="YlGn")
+
+# Labels
+ax.set_xticks(np.arange(len(psnr_list)))
+ax.set_yticks([0, 1])
+ax.set_yticklabels(["PSNR", "SSIM"])
+
+# Annotate
+for i in range(2):
+    for j in range(len(psnr_list)):
+        text = ax.text(j, i, f"{data[i, j]:.2f}",
+                       ha="center", va="center", color="black", fontsize=8)
+
+ax.set_title("PSNR and SSIM Heatmap per Epoch")
+fig.tight_layout()
+plt.show()

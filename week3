@@ -1,0 +1,22 @@
+Week 3: DIV2K Dataset Preparation, LR-HR Pair Generation, and Custom PyTorch Dataset About the DIV2K Dataset:
+Full Form: DIVerse 2K resolution dataset.
+Provides high-quality HR images for Super-Resolution research.
+Training Set: 800 images
+Validation Set: 100 images
+Testing Set: 100 images (without ground truth for benchmarking)
+Steps I Followed for Dataset Preparation: Downloading the DIV2K dataset:
+Used the TensorFlow dataset catalog: https://www.tensorflow.org/datasets/catalog/div2k
+Alternatively downloaded images manually.
+Generating LR-HR Pairs:
+Downsampling Method: Bicubic downsampling.
+Downsampled the HR images by scale factor 4 to get LR images.
+Example: Original HR image size: 2040x2040 Generated LR image size: 510x510
+Custom PyTorch Dataset:
+Created a Python class inheriting from torch.utils.data.Dataset.
+Loaded both HR and LR images.
+Applied necessary transformations: Tensor conversion, Normalization.
+Supported DataLoader batching for training.
+PyTorch DataLoader:
+Split dataset into train and validation.
+Used DataLoader for efficient batch loading.
+Implemented custom dataset following: https://pytorch.org/tutorials/beginner/data_loading_tutorial.html

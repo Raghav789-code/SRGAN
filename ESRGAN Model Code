@@ -1,0 +1,200 @@
+# Import required libraries
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
+import torchvision.transforms as transforms
+import torchvision.models as models
+from PIL import Image
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+from torchvision.utils import save_image
+
+# Dataset Class
+class ImageDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.image_files = os.listdir(root_dir)
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, idx):
+        img_name = os.path.join(self.root_dir, self.image_files[idx])
+        image = Image.open(img_name).convert("RGB")
+        if self.transform:
+            image = self.transform(image)
+        return image
+
+# RRDB Block
+class RRDB(nn.Module):
+    def __init__(self, in_channels):
+        super(RRDB, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
+        self.relu = nn.LeakyReLU(0.2, inplace=True)
+
+    def forward(self, x):
+        out = self.relu(self.conv1(x))
+        out = self.relu(self.conv2(out))
+        out = self.conv3(out)
+        return x + out
+
+# Generator
+class Generator(nn.Module):
+    def __init__(self, in_channels=3, num_rrdb=5):  # Reduced RRDB for quick training
+        super(Generator, self).__init__()
+        self.initial_conv = nn.Conv2d(in_channels, 64, kernel_size=3, padding=1)
+        self.rrdb_blocks = nn.Sequential(*[RRDB(64) for _ in range(num_rrdb)])
+        self.final_conv = nn.Conv2d(64, in_channels, kernel_size=3, padding=1)
+
+    def forward(self, x):
+        initial = self.initial_conv(x)
+        out = self.rrdb_blocks(initial)
+        out = self.final_conv(out)
+        return out
+
+# Discriminator
+class Discriminator(nn.Module):
+    def __init__(self, in_channels=3):
+        super(Discriminator, self).__init__()
+
+        def block(in_feat, out_feat, normalize=True):
+            layers = [nn.Conv2d(in_feat, out_feat, 4, stride=2, padding=1)]
+            if normalize:
+                layers.append(nn.BatchNorm2d(out_feat))
+            layers.append(nn.LeakyReLU(0.2, inplace=True))
+            return layers
+
+        self.model = nn.Sequential(
+            *block(in_channels, 64, normalize=False),
+            *block(64, 128),
+            *block(128, 256),
+            *block(256, 512),
+            nn.Conv2d(512, 1, 3, stride=1, padding=1)
+        )
+
+    def forward(self, img):
+        return self.model(img)
+
+# Content Loss
+class ContentLoss(nn.Module):
+    def __init__(self):
+        super(ContentLoss, self).__init__()
+
+    def forward(self, sr, hr):
+        return F.mse_loss(sr, hr)
+
+# Perceptual Loss
+class PerceptualLoss(nn.Module):
+    def __init__(self, vgg_model):
+        super(PerceptualLoss, self).__init__()
+        self.vgg = vgg_model.features[:36].eval()
+        for param in self.vgg.parameters():
+            param.requires_grad = False
+
+    def forward(self, sr, hr):
+        sr_features = self.vgg(sr)
+        hr_features = self.vgg(hr)
+        return F.mse_loss(sr_features, hr_features)
+
+# Training Function
+def train(generator, discriminator, dataloader, num_epochs, optimizer_G, optimizer_D,
+          criterion_content, criterion_perceptual, device):
+
+    generator.to(device)
+    discriminator.to(device)
+
+    for epoch in range(num_epochs):
+        for i, img in enumerate(dataloader):
+            img = img.to(device)
+
+            # Train Generator
+            optimizer_G.zero_grad()
+            sr = generator(img)
+            content_loss = criterion_content(sr, img)
+            perceptual_loss = criterion_perceptual(sr, img)
+            g_loss = content_loss + perceptual_loss
+            g_loss.backward()
+            optimizer_G.step()
+
+            # Train Discriminator
+            optimizer_D.zero_grad()
+            real_output = discriminator(img)
+            fake_output = discriminator(sr.detach())
+
+            d_loss = F.binary_cross_entropy_with_logits(real_output, torch.ones_like(real_output)) + \
+                     F.binary_cross_entropy_with_logits(fake_output, torch.zeros_like(fake_output))
+
+            d_loss.backward()
+            optimizer_D.step()
+
+            if i % 10 == 0:
+                print(f"Epoch [{epoch}/{num_epochs}] Step [{i}] G Loss: {g_loss.item():.4f} D Loss: {d_loss.item():.4f}")
+
+# Test Function
+def upscale_image(generator, lr_image, device):
+    generator.to(device)
+    generator.eval()
+    with torch.no_grad():
+        lr_image = lr_image.to(device)
+        sr_image = generator(lr_image)
+    return sr_image
+
+# Main Execution
+if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Data transforms
+    transform = transforms.Compose([
+        transforms.Resize((128, 128)),
+        transforms.ToTensor()
+    ])
+
+    # Dataset and DataLoader
+    dataset = ImageDataset(root_dir="BSDS300/images/train", transform=transform)
+    dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+
+    # Initialize models
+    generator = Generator()
+    discriminator = Discriminator()
+
+    # Optimizers
+    optimizer_G = optim.Adam(generator.parameters(), lr=0.0002)
+    optimizer_D = optim.Adam(discriminator.parameters(), lr=0.0002)
+
+    # VGG for perceptual loss
+    vgg = models.vgg19(pretrained=True).to(device)
+
+    # Losses
+    criterion_content = ContentLoss()
+    criterion_perceptual = PerceptualLoss(vgg)
+
+    # Train the model
+    train(generator, discriminator, dataloader, num_epochs=2, optimizer_G=optimizer_G,
+          optimizer_D=optimizer_D, criterion_content=criterion_content,
+          criterion_perceptual=criterion_perceptual, device=device)
+
+    # Testing with a sample image
+    test_image = Image.open("BSDS300/images/test/3096.jpg").convert("RGB")
+    test_image = transform(test_image).unsqueeze(0)
+
+    sr_image = upscale_image(generator, test_image, device)
+
+    save_image(sr_image, "sr_image.png")
+    save_image(test_image, "lr_image.png")
+
+    plt.figure(figsize=(8, 4))
+    plt.subplot(1, 2, 1)
+    plt.title("Low-Resolution")
+    plt.imshow(np.transpose(test_image.squeeze().cpu().numpy(), (1, 2, 0)))
+
+    plt.subplot(1, 2, 2)
+    plt.title("Super-Resolution")
+    plt.imshow(np.transpose(sr_image.squeeze().cpu().numpy(), (1, 2, 0)))
+
+    plt.show()
